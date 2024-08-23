@@ -8,9 +8,21 @@ app.use(function(req, res, next) {
     next();
   });
 
+app.use(express.json());
+
 app.get('/api/data', (req, res) => {
     const data = { message: "Hello from the server...changed..."}
     res.json(data);
+});
+
+app.post('/api/login', (req, res) => {
+    const {email, password} = req.body;
+
+    //processing data here
+    console.log('Username ', email);
+    console.log('password ', password);
+
+    res.json({message: 'Login erfolgreich - Server'});
 });
 
 app.listen(port, () => {
