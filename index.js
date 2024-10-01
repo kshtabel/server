@@ -5,8 +5,17 @@ const mysql = require('mysql2');
 const app = express();
 const port = 3000;
 const cors = require('cors');
+require('dotenv').config({path: '../server/.env'})
+const path = require('path');
+const multer = require('multer');
+const saltRounds = 10;
+const axios = require('axios');
+const http = require('http');
 
-const JWT_SECRET = 'd1a542245dbbb189cc189674ba0b1c86b8b9cc9ab5174256afa6803fdaad8aa0960621ea260a9930035a45e2bd49d45b650c5b7005dea3659f3ae6a4b8fd7a4cd927779c7de54d05342bf0e47c2634c3103fa063dbfaa785763a7a60a687977e302c74ea18c78e7f2b1f73b3027ea0211c94f2d3724902d76f8af912a11ee444'; // Verwende einen sicheren Schlüssel und speichere ihn sicher
+// Statische Dateien aus dem Ordner 'uploads' bereitstellen
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+const JWT_SECRET = process.env.JWT_SECRET; // Verwende einen sicheren Schlüssel und speichere ihn sicher
 
 ////////////////////// SERVER FUNC  //////////////////////
 
@@ -45,6 +54,18 @@ function generateRandomBase58(length) {
   }
   return result;
 }
+
+// Multer-Konfiguration für Dateiuploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/');
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + path.extname(file.originalname)); // Dateiname basierend auf Zeitstempel
+  },
+});
+
+const upload = multer({ storage });
 
 function requireRole(role) {
   return function (req, res, next) {
@@ -86,31 +107,32 @@ const db = mysql.createConnection({
   database: 'NodeBase'
 });
 
-// db.connect((err) => {
-//   if (err) throw err;
-//   console.log('MySQL connected...');
-  
-//   // Beispiel Benutzer erstellen
-//   const testUser = { name: 'TestUser', password: 'password123', role: 'user' };
-//   const saltRounds = 10;
+// Endpoint: /api/market-data
+app.get('/api/market-data', async (req, res) => {
+  try {
+    const response = await axios.get('https://min-api.cryptocompare.com/data/price', {
+      params: {
+        fsym: 'BTC',
+        tsyms: 'USD',
+      },
+      headers: {
+        authorization: `Apikey ${process.env.DEV_CRYPTOCOMPARE_API}`, // API-Key im Header
+      },
+    });
 
-//   bcrypt.hash(testUser.password, saltRounds, (err, hash) => {
-//     if (err) throw err;
-//     const sql = `INSERT INTO user (name, password, role) VALUES (?, ?, ?)`;
-//     db.query(sql, [testUser.name, hash, testUser.role], (err, result) => {
-//       if (err) {
-//         if (err.code === 'ER_DUP_ENTRY') {
-//           console.log('TestUser already exists.');
-//         } else {
-//           throw err;
-//         }
-//       } else {
-//         console.log('TestUser created successfully.');
-//       }
-//     });
-//   });
-// });
+    const marketData = response.data;
+    const timestamp = Date.now();
 
+    // Senden der Marktdaten an das Frontend
+    res.json({
+      price: marketData.USD,
+      timestamp: timestamp,
+    });
+  } catch (error) {
+    console.error('Fehler beim Abrufen der Marktdaten:', error);
+    res.status(500).json({ error: 'Fehler beim Abrufen der Marktdaten' });
+  }
+});
 
 // Login-Route
 app.post('/api/login', (req, res) => {
@@ -146,6 +168,7 @@ app.post('/api/login', (req, res) => {
 });
 
 ////////////////////// END SERVER FUNC //////////////////////
+
 
 ////////////////////// API ADMIN //////////////////////
 
@@ -290,6 +313,66 @@ app.post('/api/admin/addUser', requireRole('admin'), (req, res) => {
 
 ////////////////////// API USER //////////////////////
 
+// API endpoint for user registration
+app.post('/api/registration', async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    // Check if the user already exists
+    const userCheckQuery = 'SELECT id FROM user WHERE name = ?';
+    db.query(userCheckQuery, [username], async (err, results) => {
+      if (err) {
+        console.error('Error checking user:', err);
+        return res.status(500).json({ message: 'Error checking user.' });
+      }
+
+      if (results.length > 0) {
+        // User already exists
+        return res.json({ status: 'USER_EXIST_Y' });
+      } else {
+        try {
+          // Hash the password
+          const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+          // Generate a new wallet address and set balance to 0
+          const walletAddress = generateRandomBase58(34);
+          const walletBalance = '0.00000000';
+
+          // Insert new wallet into the wallets table
+          const insertWalletQuery = 'INSERT INTO wallets (wallet_address, wallet_balance) VALUES (?, ?)';
+          db.query(insertWalletQuery, [walletAddress, walletBalance], (err, walletResult) => {
+            if (err) {
+              console.error('Error creating wallet:', err);
+              return res.status(500).json({ message: 'Error creating wallet.' });
+            }
+
+            // Get the newly created wallet ID
+            const walletId = walletResult.insertId;
+
+            // Insert new user into the user table with the wallet_id
+            const insertUserQuery = 'INSERT INTO user (name, password, wallet_id) VALUES (?, ?, ?)';
+            db.query(insertUserQuery, [username, hashedPassword, walletId], (err) => {
+              if (err) {
+                console.error('Error creating user:', err);
+                return res.status(500).json({ message: 'Error creating user.' });
+              }
+
+              // Registration successful
+              return res.json({ status: 'USER_EXIST_N' });
+            });
+          });
+        } catch (error) {
+          console.error('Error during password hashing or wallet creation:', error);
+          return res.status(500).json({ message: 'Registration failed during hashing or wallet creation.' });
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error during registration:', error);
+    return res.status(500).json({ message: 'Registration failed.' });
+  }
+});
+
 // GET /api/user/wallet - Holt die Wallet-Adresse des angemeldeten Benutzers
 app.get('/api/user/wallet', verifyToken, (req, res) => {
   const userId = req.user.id;
@@ -346,6 +429,24 @@ app.get('/api/user/wallet/:id', (req, res) => {
   });
 });
 
+// API Endpunkt: /api/user/wallet/transactions/:id
+app.get('/api/user/wallet/transactions/:id', (req, res) => {
+  const userId = req.params.id;
+
+  // SQL query to get transactions by user ID
+  const sqlQuery = 'SELECT * FROM transactions WHERE user_id = ?';
+
+  db.query(sqlQuery, [userId], (err, results) => {
+    if (err) {
+      console.error('Fehler beim Abrufen der Transaktionsdaten:', err);
+      return res.status(500).json({ error: 'Fehler beim Abrufen der Transaktionsdaten.' });
+    }
+
+    // Return the retrieved transactions to the frontend
+    res.status(200).json(results);
+  });
+});
+
 // PUT /api/user/wallet - Aktualisiert die Wallet-Adresse des angemeldeten Benutzers
 app.put('/api/user/wallet', verifyToken, (req, res) => {
   const userId = req.user.id;
@@ -379,9 +480,105 @@ app.get('/api/data', verifyToken, (req, res) => {
 
 ////////////////////// END API USER //////////////////////
 
-////////////////////// WALLET API //////////////////////
+////////////////////// REAL ESTATE API //////////////////////
 
-////////////////////// END WALLET API //////////////////
+// API-Endpunkt zum Abrufen der Immobilien
+app.get('/api/realEstate', (req, res) => {
+  // SQL-Abfrage, um die Immobilien und ihre zugehörigen Bilder zu erhalten
+  const sqlQuery = `
+    SELECT re.id, re.title, re.description, re.detailedDescription, re.price, rei.image_path
+    FROM realEstate AS re
+    LEFT JOIN realEstateImages AS rei ON re.id = rei.realEstate_id
+  `;
+
+  db.query(sqlQuery, (err, results) => {
+    if (err) {
+      console.error('Fehler beim Abrufen der Immobilien:', err);
+      return res.status(500).json({ error: 'Fehler beim Abrufen der Immobilien' });
+    }
+
+    // Immobilien-Objekte zusammenstellen, inklusive ihrer Bilder
+    const realEstateMap = {};
+
+    results.forEach((row) => {
+      if (!realEstateMap[row.id]) {
+        realEstateMap[row.id] = {
+          id: row.id,
+          title: row.title,
+          description: row.description,
+          detailedDescription: row.detailedDescription,
+          price: row.price,
+          images: [] // Bilder werden hinzugefügt
+        };
+      }
+
+      // Bilder zur jeweiligen Immobilie hinzufügen (wenn vorhanden)
+      if (row.image_path) {
+        realEstateMap[row.id].images.push(row.image_path);
+      }
+    });
+
+    // Immobilien in ein Array umwandeln und zurückgeben
+    const realEstateList = Object.values(realEstateMap);
+    res.json(realEstateList);
+  });
+});
+
+// API-Endpunkt zum Erstellen einer Immobilie
+app.post('/api/realEstate/createEstate', upload.array('images', 10), (req, res) => {
+  const { title, description, detailedDescription, price } = req.body;
+
+  // Schritt 1: Immobilie in die Tabelle "realEstate" einfügen
+  const insertRealEstate = `INSERT INTO realEstate (title, description, detailedDescription, price, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())`;
+
+  db.query(insertRealEstate, [title, description, detailedDescription, price], (err, result) => {
+    if (err) {
+      return res.status(500).json({ error: 'Fehler beim Erstellen der Immobilie' });
+    }
+
+    const realEstateId = result.insertId; // Die ID der neu erstellten Immobilie
+
+    // Schritt 2: Bilder in die Tabelle "realEstateImages" einfügen
+    const imagePaths = req.files.map((file) => ['uploads/' + file.filename, realEstateId]);
+
+    const insertImages = `INSERT INTO realEstateImages (image_path, realEstate_id) VALUES ?`;
+
+    db.query(insertImages, [imagePaths], (err, result) => {
+      if (err) {
+        return res.status(500).json({ error: 'Fehler beim Speichern der Bilder' });
+      }
+
+      res.status(200).json({ message: 'Immobilie und Bilder erfolgreich erstellt.' });
+    });
+  });
+});
+
+// Immobilien und ihre Bilder löschen
+app.delete('/api/realEstate/delete/:id', requireRole('admin'), (req, res) => {
+  const realEstateId = req.params.id;
+
+  // SQL-Anfragen, um die Immobilie und die zugehörigen Bilder zu löschen
+  const deleteImagesQuery = 'DELETE FROM realestateimages WHERE realestate_id = ?';
+  const deleteRealEstateQuery = 'DELETE FROM realestate WHERE id = ?';
+
+  db.query(deleteImagesQuery, [realEstateId], (err) => {
+    if (err) {
+      console.error('Fehler beim Löschen der Bilder:', err);
+      return res.status(500).json({ error: 'Fehler beim Löschen der Bilder' });
+    }
+
+    db.query(deleteRealEstateQuery, [realEstateId], (err) => {
+      if (err) {
+        console.error('Fehler beim Löschen der Immobilie:', err);
+        return res.status(500).json({ error: 'Fehler beim Löschen der Immobilie' });
+      }
+
+      res.status(200).json({ success: true });
+    });
+  });
+});
+
+////////////////////// END REAL ESTATE API //////////////////
 
 ////////////////////// Server //////////////////////
 
